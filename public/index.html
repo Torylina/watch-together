@@ -16,7 +16,7 @@
   button:hover { background: #f0509a; }
   main { flex: 1; display: flex; min-height: 0; }
   #playerWrap { flex: 1; background: #000; min-width: 0; }
-  #player { width: 100%; height: 100%; }
+  #ytBox, #vkBox { width: 100%; height: 100%; }
   aside { width: 320px; display: flex; flex-direction: column; background: #ffc9e2; }
   #info { padding: 10px; font-size: 14px; border-bottom: 1px solid #ff9cc8; }
   #msgs { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -38,12 +38,12 @@
 </head>
 <body>
 <header>
-  <input id="url" placeholder="Вставьте ссылку на YouTube-видео">
+  <input id="url" placeholder="Ссылка на YouTube или VK Видео">
   <button id="load">Смотреть</button>
   <button id="copy">Скопировать ссылку на комнату</button>
 </header>
 <main>
-  <div id="playerWrap"><div id="player"></div></div>
+  <div id="playerWrap"><div id="ytBox"><div id="ytPlayer"></div></div><div id="vkBox" style="display:none"></div></div>
   <aside>
     <div id="info">В комнате: <span id="count">1</span></div>
     <div id="msgs"></div>
@@ -54,16 +54,26 @@
   </aside>
 </main>
 
+<script src="https://vk.ru/js/api/videoplayer.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const roomId = location.pathname.split('/')[2];
 let name = localStorage.getItem('wt-name');
 if (!name) { name = prompt('Ваше имя?') || 'Гость' + Math.floor(Math.random() * 100); localStorage.setItem('wt-name', name); }
 
-let ws, player, ready = false, currentVideo = null, pending = null;
+const ytBox = document.getElementById('ytBox');
+const vkBox = document.getElementById('vkBox');
+let ws, pending = null, active = null, currentKey = null;
 let applying = false, applyTimer;
 let lastTime = 0, lastTs = Date.now(), lastPlaying = false;
 
+function lockApplying(ms) {
+  applying = true;
+  clearTimeout(applyTimer);
+  applyTimer = setTimeout(() => { applying = false; }, ms || 1200);
+}
+
+// ---------- Соединение ----------
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?room=' + roomId);
   ws.onmessage = (e) => {
@@ -76,71 +86,131 @@ function connect() {
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
+// ---------- YouTube ----------
+let yt = null, ytReady = false;
 function onYouTubeIframeAPIReady() {
-  player = new YT.Player('player', {
+  yt = new YT.Player('ytPlayer', {
     width: '100%', height: '100%',
     host: 'https://www.youtube.com',
     playerVars: { playsinline: 1, rel: 0, origin: location.origin },
     events: {
-      onReady: () => { ready = true; if (pending) { applyState(pending); pending = null; } },
-      onStateChange: onPlayerState
+      onReady: () => { ytReady = true; if (pending) { const p = pending; pending = null; applyState(p); } },
+      onStateChange: (e) => {
+        if (applying) return;
+        if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.PAUSED) pushState();
+      }
     }
   });
 }
+const YTA = {
+  ready: () => ytReady,
+  show() { ytBox.style.display = 'block'; },
+  hide() { if (ytReady) yt.pauseVideo(); ytBox.style.display = 'none'; },
+  load(id, time, playing) { playing ? yt.loadVideoById(id, time) : yt.cueVideoById(id, time); },
+  play() { yt.playVideo(); },
+  pause() { yt.pauseVideo(); },
+  seek(t) { yt.seekTo(t, true); },
+  time() { return yt.getCurrentTime(); },
+  isPlaying() { return yt.getPlayerState() === YT.PlayerState.PLAYING; },
+  tolerance: 1.5
+};
 
-function lockApplying() {
-  applying = true;
-  clearTimeout(applyTimer);
-  applyTimer = setTimeout(() => { applying = false; }, 1200);
+// ---------- VK Видео ----------
+let vk = null, vkTime = 0, vkPlaying = false;
+function destroyVk() {
+  if (vk) { try { vk.destroy(); } catch (e) {} vk = null; }
+  vkBox.innerHTML = '';
 }
+function vkEvent(playing) { vkPlaying = playing; if (!applying) pushState(); }
+const VKA = {
+  ready: () => typeof VK !== 'undefined' && !!VK.VideoPlayer,
+  show() { vkBox.style.display = 'block'; },
+  hide() { destroyVk(); vkBox.style.display = 'none'; },
+  load(key, time, playing) {
+    destroyVk();
+    const [oid, id, hash] = key.split('_');
+    const f = document.createElement('iframe');
+    f.src = 'https://vk.ru/video_ext.php?oid=' + oid + '&id=' + id + (hash ? '&hash=' + hash : '') + '&js_api=1';
+    f.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
+    f.allowFullscreen = true;
+    f.style.cssText = 'width:100%;height:100%;border:0';
+    vkBox.append(f);
+    vk = VK.VideoPlayer(f);
+    vkTime = time; vkPlaying = false;
+    vk.on('inited', () => {
+      lockApplying(2500);
+      if (time > 0) vk.seek(time);
+      if (playing) vk.play();
+    });
+    vk.on('timeupdate', (st) => { vkTime = st.time; });
+    vk.on('started', () => vkEvent(true));
+    vk.on('resumed', () => vkEvent(true));
+    vk.on('paused', () => vkEvent(false));
+  },
+  play() { if (vk) vk.play(); },
+  pause() { if (vk) vk.pause(); },
+  seek(t) { if (vk) vk.seek(t); },
+  time() { return vkTime; },
+  isPlaying() { return vkPlaying; },
+  tolerance: 2.5   // VK отдаёт время целыми секундами
+};
 
+const ADAPTERS = { yt: YTA, vk: VKA };
+
+// ---------- Синхронизация ----------
 function applyState(s) {
-  if (!ready) { pending = s; return; }
   if (!s.videoId) return;
+  const kind = s.videoId.slice(0, 2), id = s.videoId.slice(3);
+  const a = ADAPTERS[kind];
+  if (!a) return;
+  if (!a.ready()) { pending = s; return; }
   lockApplying();
-  if (s.videoId !== currentVideo) {
-    currentVideo = s.videoId;
-    if (s.playing) player.loadVideoById(s.videoId, s.time);
-    else player.cueVideoById(s.videoId, s.time);
+  if (s.videoId !== currentKey) {
+    if (active && active !== a) active.hide();
+    active = a; a.show();
+    currentKey = s.videoId;
+    a.load(id, s.time, s.playing);
   } else {
-    if (Math.abs(player.getCurrentTime() - s.time) > 1) player.seekTo(s.time, true);
-    if (s.playing) player.playVideo(); else player.pauseVideo();
+    if (Math.abs(a.time() - s.time) > a.tolerance) a.seek(s.time);
+    s.playing ? a.play() : a.pause();
   }
   lastTime = s.time; lastTs = Date.now(); lastPlaying = s.playing;
 }
 
 function pushState() {
-  const t = player.getCurrentTime();
-  const playing = player.getPlayerState() === YT.PlayerState.PLAYING;
+  if (!active) return;
+  const t = active.time(), playing = active.isPlaying();
   lastTime = t; lastTs = Date.now(); lastPlaying = playing;
-  send({ type: 'state', videoId: currentVideo, playing, time: t });
+  send({ type: 'state', videoId: currentKey, playing, time: t });
 }
 
-function onPlayerState(e) {
-  if (applying) return;
-  if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.PAUSED) pushState();
-}
-
-// В YouTube API нет события перемотки — ловим скачок времени
+// Перемотку определяем по скачку времени
 setInterval(() => {
-  if (!ready || applying || !currentVideo) return;
-  const cur = player.getCurrentTime();
+  if (!active || applying || !currentKey) return;
+  const cur = active.time();
   const expected = lastPlaying ? lastTime + (Date.now() - lastTs) / 1000 : lastTime;
-  if (Math.abs(cur - expected) > 1.5) pushState();
+  if (Math.abs(cur - expected) > active.tolerance) pushState();
 }, 500);
 
-function parseYouTubeId(u) {
+// ---------- Разбор ссылок ----------
+function parseVideo(u) {
+  if (/vk(video)?\.(com|ru)/i.test(u)) {
+    let m = u.match(/video(-?\d+)_(\d+)(?:_([0-9a-f]+))?/i);
+    if (m) return 'vk:' + m[1] + '_' + m[2] + (m[3] ? '_' + m[3] : '');
+    const oid = u.match(/[?&]oid=(-?\d+)/), id = u.match(/[?&]id=(\d+)/), h = u.match(/[?&]hash=([0-9a-f]+)/i);
+    if (oid && id) return 'vk:' + oid[1] + '_' + id[1] + (h ? '_' + h[1] : '');
+    return null;
+  }
   const m = u.match(/(?:youtu\.be\/|v=|embed\/|shorts\/)([\w-]{11})/);
-  return m ? m[1] : null;
+  return m ? 'yt:' + m[1] : null;
 }
+
 document.getElementById('load').onclick = () => {
-  const id = parseYouTubeId(document.getElementById('url').value.trim());
-  if (!id) return alert('Не удалось распознать ссылку на YouTube');
-  currentVideo = id;
-  lockApplying();
-  if (ready) player.loadVideoById(id, 0);
-  lastTime = 0; lastTs = Date.now(); lastPlaying = true;
-  send({ type: 'state', videoId: id, playing: true, time: 0 });
+  const key = parseVideo(document.getElementById('url').value.trim());
+  if (!key) return alert('Не удалось распознать ссылку. Поддерживаются YouTube и VK Видео.');
+  const s = { videoId: key, playing: true, time: 0 };
+  applyState(s);
+  send({ type: 'state', ...s });
   document.getElementById('url').value = '';
 };
 document.getElementById('copy').onclick = () => {
@@ -149,6 +219,7 @@ document.getElementById('copy').onclick = () => {
   setTimeout(() => document.getElementById('copy').textContent = 'Скопировать ссылку на комнату', 1500);
 };
 
+// ---------- Чат ----------
 function addMsg(n, text) {
   const box = document.getElementById('msgs');
   const d = document.createElement('div'); d.className = 'msg';

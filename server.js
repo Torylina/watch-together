@@ -54,7 +54,7 @@ wss.on('connection', (ws, req) => {
     try { m = JSON.parse(raw); } catch { return; }
 
     if (m.type === 'state') {
-      if (typeof m.videoId === 'string') room.videoId = m.videoId.slice(0, 20);
+      if (typeof m.videoId === 'string') room.videoId = m.videoId.slice(0, 100);
       room.playing = !!m.playing;
       room.time = Number(m.time) || 0;
       room.updatedAt = Date.now();
