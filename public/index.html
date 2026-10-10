@@ -32,6 +32,15 @@
   .picker { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
   .picker[hidden] { display: none; }
   .picker button { font-size: 18px; padding: 2px 6px; }
+  #queueBox { padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #ff9cc8; }
+  #queueBox summary { cursor: pointer; }
+  #queueList { max-height: 150px; overflow-y: auto; margin-top: 4px; }
+  .qempty { opacity: .7; padding: 4px 0; }
+  .qitem { display: flex; gap: 6px; align-items: center; padding: 4px 0; }
+  .qitem img { width: 48px; height: 36px; object-fit: cover; border-radius: 4px; background: #ffd6ea; }
+  .qitem .qthumb { width: 48px; height: 36px; border-radius: 4px; background: #ffd6ea; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+  .qitem span.qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qitem button { padding: 2px 8px; border-radius: 8px; font-size: 13px; }
   form { display: flex; gap: 6px; padding: 10px; }
   form input { flex: 1; font-size: 16px; padding: 10px; border: 0; border-radius: 8px; background: #fff0f7; color: #4a1030; }
   @media (max-width: 800px) {
@@ -42,6 +51,7 @@
     #playerWrap { flex: none; width: 100%; aspect-ratio: 16 / 9; }
     aside { width: 100%; flex: 1; min-height: 0; }
     #info { padding: 6px 10px; font-size: 13px; }
+    #queueList { max-height: 90px; }
     form { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
   }
 </style>
@@ -50,12 +60,14 @@
 <header>
   <input id="url" placeholder="Ссылка на YouTube или VK Видео">
   <button id="load">Смотреть</button>
+  <button id="enqueue">В очередь</button>
   <button id="copy">Скопировать ссылку на комнату</button>
 </header>
 <main>
   <div id="playerWrap"><div id="ytBox"><div id="ytPlayer"></div></div><div id="vkBox" style="display:none"></div></div>
   <aside>
     <div id="info">В комнате: <span id="count">1</span></div>
+    <details id="queueBox"><summary>Очередь (<span id="qcount">0</span>)</summary><div id="queueList"></div></details>
     <div id="msgs"></div>
     <form id="chatForm">
       <input id="chatInput" placeholder="Сообщение..." autocomplete="off" maxlength="500">
@@ -91,6 +103,7 @@ function connect() {
     if (m.type === 'state') applyState(m);
     else if (m.type === 'chat') addMsg(m.name, m.text, m.id);
     else if (m.type === 'react') applyReact(m);
+    else if (m.type === 'queue') { queue = m.queue || []; renderQueue(); }
     else if (m.type === 'users') document.getElementById('count').textContent = m.count;
   };
   ws.onclose = () => setTimeout(connect, 1500);
@@ -108,6 +121,7 @@ function onYouTubeIframeAPIReady() {
       onReady: () => { ytReady = true; if (pending) { const p = pending; pending = null; applyState(p); } },
       onStateChange: (e) => {
         if (applying) return;
+        if (e.data === YT.PlayerState.ENDED) { send({ type: 'next', videoId: currentKey }); return; }
         if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.PAUSED) pushState();
       }
     }
@@ -157,6 +171,7 @@ const VKA = {
     vk.on('started', () => vkEvent(true));
     vk.on('resumed', () => vkEvent(true));
     vk.on('paused', () => vkEvent(false));
+    vk.on('ended', () => { if (!applying) send({ type: 'next', videoId: currentKey }); });
   },
   play() { if (vk) vk.play(); },
   pause() { if (vk) vk.pause(); },
@@ -223,6 +238,14 @@ document.getElementById('load').onclick = () => {
   applyState(s);
   send({ type: 'state', ...s });
   document.getElementById('url').value = '';
+};
+document.getElementById('enqueue').onclick = () => {
+  const inp = document.getElementById('url');
+  const key = parseVideo(inp.value.trim());
+  if (!key) return alert('Не удалось распознать ссылку. Поддерживаются YouTube и VK Видео.');
+  send({ type: 'queue_add', videoId: key });
+  inp.value = '';
+  document.getElementById('queueBox').open = true;
 };
 document.getElementById('copy').onclick = () => {
   navigator.clipboard.writeText(location.href);
@@ -293,6 +316,51 @@ document.getElementById('chatForm').onsubmit = (e) => {
   send({ type: 'chat', name, text });
   inp.value = '';
 };
+
+// ---------- Очередь ----------
+let queue = [];
+const titles = {}, asked = new Set();
+function labelOf(key) {
+  if (titles[key]) return titles[key];
+  return key.startsWith('yt:') ? 'YouTube ' + key.slice(3) : 'VK Видео ' + key.slice(3).split('_').slice(0, 2).join('_');
+}
+function fetchTitle(key) {
+  if (!key.startsWith('yt:') || asked.has(key)) return;
+  asked.add(key);
+  fetch('https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + key.slice(3)))
+    .then((r) => r.json())
+    .then((j) => { if (j && j.title) { titles[key] = j.title; renderQueue(); } })
+    .catch(() => {});
+}
+function renderQueue() {
+  const list = document.getElementById('queueList');
+  document.getElementById('qcount').textContent = queue.length;
+  list.innerHTML = '';
+  if (!queue.length) {
+    const e = document.createElement('div'); e.className = 'qempty'; e.textContent = 'Очередь пуста';
+    list.append(e);
+    return;
+  }
+  queue.forEach((q) => {
+    fetchTitle(q.videoId);
+    const row = document.createElement('div'); row.className = 'qitem';
+    let thumb;
+    if (q.videoId.startsWith('yt:')) {
+      thumb = document.createElement('img');
+      thumb.src = 'https://i.ytimg.com/vi/' + q.videoId.slice(3) + '/default.jpg';
+      thumb.alt = '';
+    } else {
+      thumb = document.createElement('div'); thumb.className = 'qthumb'; thumb.textContent = 'VK';
+    }
+    const t = document.createElement('span'); t.className = 'qt'; t.textContent = labelOf(q.videoId); t.title = labelOf(q.videoId);
+    const play = document.createElement('button'); play.type = 'button'; play.textContent = '▶'; play.title = 'Включить сейчас';
+    play.onclick = () => send({ type: 'queue_play', qid: q.id });
+    const del = document.createElement('button'); del.type = 'button'; del.textContent = '✕'; del.title = 'Убрать из очереди';
+    del.onclick = () => send({ type: 'queue_remove', qid: q.id });
+    row.append(thumb, t, play, del);
+    list.append(row);
+  });
+}
 
 connect();
 </script>
