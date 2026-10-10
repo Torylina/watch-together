@@ -62,7 +62,19 @@ wss.on('connection', (ws, req) => {
     } else if (m.type === 'chat') {
       const text = String(m.text || '').slice(0, 500);
       const name = String(m.name || 'Аноним').slice(0, 30);
-      if (text.trim()) broadcast(roomId, { type: 'chat', name, text });
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      if (text.trim()) broadcast(roomId, { type: 'chat', id, name, text });
+    } else if (m.type === 'react') {
+      const emoji = String(m.emoji || '').slice(0, 8);
+      if (emoji && m.msgId) {
+        broadcast(roomId, {
+          type: 'react',
+          msgId: String(m.msgId).slice(0, 30),
+          emoji,
+          uid: String(m.uid || '').slice(0, 40),
+          on: !!m.on
+        });
+      }
     }
   });
 

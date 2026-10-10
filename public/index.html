@@ -23,6 +23,15 @@
   #msgs { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .msg { background: #fff0f7; padding: 8px 10px; border-radius: 10px; word-break: break-word; }
   .msg b { display: block; font-size: 12px; color: #d02a78; }
+  .reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
+  .chips { display: contents; }
+  .chip, .add-react, .picker button { padding: 2px 8px; border-radius: 12px; background: #ffd6ea; color: #4a1030; font-size: 14px; line-height: 1.5; }
+  .chip:hover, .add-react:hover, .picker button:hover { background: #ffb8d9; }
+  .chip.mine { background: #ff7eb6; color: #fff; }
+  .add-react { opacity: .7; }
+  .picker { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .picker[hidden] { display: none; }
+  .picker button { font-size: 18px; padding: 2px 6px; }
   form { display: flex; gap: 6px; padding: 10px; }
   form input { flex: 1; font-size: 16px; padding: 10px; border: 0; border-radius: 8px; background: #fff0f7; color: #4a1030; }
   @media (max-width: 800px) {
@@ -80,7 +89,8 @@ function connect() {
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'state') applyState(m);
-    else if (m.type === 'chat') addMsg(m.name, m.text);
+    else if (m.type === 'chat') addMsg(m.name, m.text, m.id);
+    else if (m.type === 'react') applyReact(m);
     else if (m.type === 'users') document.getElementById('count').textContent = m.count;
   };
   ws.onclose = () => setTimeout(connect, 1500);
@@ -221,13 +231,59 @@ document.getElementById('copy').onclick = () => {
 };
 
 // ---------- Чат ----------
-function addMsg(n, text) {
+const EMOJIS = ['❤️', '😂', '😮', '😢', '👍', '🔥', '🥰', '😡'];
+let uid = localStorage.getItem('wt-uid');
+if (!uid) { uid = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('wt-uid', uid); }
+const reactions = {};  // msgId -> { emoji -> Set(uid) }
+const msgEls = {};     // msgId -> { chips }
+
+function addMsg(n, text, id) {
   const box = document.getElementById('msgs');
   const d = document.createElement('div'); d.className = 'msg';
   const b = document.createElement('b'); b.textContent = n;
   const t = document.createElement('span'); t.textContent = text;
-  d.append(b, t); box.append(d);
+  d.append(b, t);
+  if (id) {
+    const bar = document.createElement('div'); bar.className = 'reactions';
+    const chips = document.createElement('span'); chips.className = 'chips';
+    const add = document.createElement('button'); add.type = 'button'; add.className = 'add-react'; add.textContent = '😊+';
+    const picker = document.createElement('div'); picker.className = 'picker'; picker.hidden = true;
+    EMOJIS.forEach((e) => {
+      const x = document.createElement('button'); x.type = 'button'; x.textContent = e;
+      x.onclick = () => { sendReact(id, e); picker.hidden = true; };
+      picker.append(x);
+    });
+    add.onclick = () => { picker.hidden = !picker.hidden; };
+    bar.append(chips, add);
+    d.append(bar, picker);
+    msgEls[id] = { chips };
+  }
+  box.append(d);
   box.scrollTop = box.scrollHeight;
+}
+function sendReact(msgId, emoji) {
+  const set = reactions[msgId] && reactions[msgId][emoji];
+  send({ type: 'react', msgId, emoji, uid, on: !(set && set.has(uid)) });
+}
+function applyReact(m) {
+  if (!reactions[m.msgId]) reactions[m.msgId] = {};
+  if (!reactions[m.msgId][m.emoji]) reactions[m.msgId][m.emoji] = new Set();
+  const set = reactions[m.msgId][m.emoji];
+  if (m.on) set.add(m.uid); else set.delete(m.uid);
+  renderChips(m.msgId);
+}
+function renderChips(id) {
+  const el = msgEls[id];
+  if (!el) return;
+  el.chips.innerHTML = '';
+  for (const [emoji, set] of Object.entries(reactions[id] || {})) {
+    if (!set.size) continue;
+    const c = document.createElement('button'); c.type = 'button';
+    c.className = 'chip' + (set.has(uid) ? ' mine' : '');
+    c.textContent = emoji + ' ' + set.size;
+    c.onclick = () => sendReact(id, emoji);
+    el.chips.append(c);
+  }
 }
 document.getElementById('chatForm').onsubmit = (e) => {
   e.preventDefault();
